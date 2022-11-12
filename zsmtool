@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+
+import sys
+import argparse
+import ruamel.yaml
+import warnings
+import io
+import math
+from ruamel.yaml.scalarint import HexInt, BinaryInt, ScalarInt
+from ruamel.yaml.comments import CommentedMap, CommentedSeq
+from struct import unpack, pack
+
+def ZSMtoYAML(ifh,z):
+    state = 0
+    psg_write_group = None
+
+    while (byte := ifh.read(1)):
+        if state == 0: # ZSM file header
+            if byte != b'z':                    # Byte 00, Magic Header
+                return False
+            if ifh.read(1) != b'm':             # Byte 01, Magic Header
+                return False
+                                                # Byte 02, version number
+            z['version'] = unpack("B",ifh.read(1))[0]
+            
+            if z['version'] != 1:    
+                return False
+                                                # Bytes 03-05, loop point
+            z['loop_addr'] = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
+                                                # Bytes 06-08, PCM offset
+            z['pcm_offset'] = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
+                                                # Byte 09, FM chanel mask
+            z['fm_channel_mask'] = unpack("B",ifh.read(1))[0]
+                                                # Bytes 0A-0B, PSG chan mask
+            z['psg_channel_mask'] = unpack("<H",ifh.read(2))[0]
+                                                # Bytes 0C-0D, tick rate
+            z['tick_rate'] = unpack("<H",ifh.read(2))[0]
+                                                # Bytes 0E-0F, reserved 0x00
+            z['reserved_header'] = HexInt(unpack("<H",ifh.read(2))[0],width=4)
+
+            z['data'] = []
+
+            state=state+1
+        elif state == 1: # ZSM Data
+            d = z['data']
+            b = unpack("B",byte)[0]
+            # Check to see if this is the loop point
+            if ifh.tell()-1 == z['loop_addr']:
+                d.append("loop")
+            if b >= 0x40: # Flush PSG write group if one exists
+                if psg_write_group is not None:
+                    d.append({'psg_write': psg_write_group})
+                    psg_write_group = None
+            if b < 0x40: # PSG write
+                if psg_write_group is None:
+                    psg_write_group = []
+                psg_write_group.append({'addr': HexInt(b,width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
+            elif b == 0x40: # EXT
+                chn = unpack("B",ifh.read(1))[0]
+                ext = {'channel': HexInt((chn >> 6) & 0x03,width=2), 'data': []}
+                for i in range(chn & 0x3f):
+                    ext['data'].append(unpack("B",ifh.read(1))[0])
+                d.append({'ext_data': ext})
+            elif b < 0x80: # a series of YM writes b & 0x3f bytes long follows
+                ymw = []
+                for i in range(b & 0x3f):
+                    r = unpack("B",ifh.read(1))[0]
+                    v = unpack("B",ifh.read(1))[0]
+                    ymw.append({'addr': r, 'data': v})
+                    #print(r)
+                d.append({"ym_write": ymw})
+            elif b == 0x80: # End of data
+                d.append("eod")
+                del z['loop_addr']
+                if z['pcm_offset'] > 0:
+                    if ifh.tell == z['pcm_offset']:
+                        state = state+1
+                        z.append({'pcm_data': []})
+                    else: # PCM data doesn't line up, error
+                        return False                        
+                else:
+                    del z['pcm_offset']
+                    return True
+            else: # Delay
+                d.append({'delay': HexInt(b & 0x7F,width=2)})
+        elif state == 2: # PCM data
+            z['pcm_data'].append(HexInt(unpack("B",ifh.read(1))[0],width=2))
+        else:
+            return False
+    
+    if state == 2:
+        # If we hit EOF, assume it was a full read
+        return True
+    else:
+        # We hit EOF unexpectedly
+        return False
+
+def YAMLtoZSM(ofh,z):
+    # Write out the header
+    ofh.write(b'zm')
+    # Write out the version
+    ofh.write(pack("B",z['version']))
+    # Write out the 24-bit loop point
+    ofh.write(pack("<H",z['loop_addr'] & 0xffff))
+    ofh.write(pack("B",(z['loop_addr'] & 0xff0000) >> 16))
+    # Write out the 24-bit PCM offset
+    ofh.write(pack("<H",z['pcm_offset'] & 0xffff))
+    ofh.write(pack("B",(z['pcm_offset'] & 0xff0000) >> 16))
+    # Write out the FM channel mask
+    ofh.write(pack("B",z['fm_channel_mask']))
+    # Write out the PSG channel mask
+    ofh.write(pack("<H",z['psg_channel_mask']))
+    # Write out the tick rate
+    ofh.write(pack("<H",z['tick_rate']))
+    # Write out the reserved header
+    ofh.write(pack("<H",z['reserved_header']))
+    # Write out ZSM data block
+    d = z['data']
+    di = 0
+    while di < len(d):
+        if type(d[di]) is CommentedMap:
+            for k2, v2 in d[di].items():
+                if k2 == 'ym_write':
+                    if len(v2) > 0x3f:
+                        warnings.warn("Excessive run length of YM write block")
+                        return False
+                    # Write out the YM write group length
+                    ofh.write(pack("B",len(v2)+0x40))
+                    i2 = 0
+                    while i2 < len(v2):
+                        # Write out the YM events themselves
+                        ofh.write(pack("B",v2[i2]['addr']))
+                        ofh.write(pack("B",v2[i2]['data']))
+                        i2 += 1
+                elif k2 == 'psg_write':
+                    i2 = 0
+                    while i2 < len(v2):
+                        # Write out the PSG events themselves
+                        if v2[i2]['addr'] > 0x3f:
+                            warnings.warn("PSG register address out of bounds")
+                            return False
+                        ofh.write(pack("B",v2[i2]['addr']))
+                        ofh.write(pack("B",v2[i2]['data']))
+                        i2 += 1
+                elif k2 == 'delay':
+                    if v2 > 0x7f:
+                        warnings.warn("Delay out of bounds")
+                        return False
+                    ofh.write(pack("B",v2 + 0x80))
+                else:
+                    warnings.warn("Unrecognized token: {0}".format(k2))
+                    return False
+        elif type(d[di]) is str:
+            if d[di] == 'loop':
+                pass
+            elif d[di] == 'eod':
+                ofh.write(b'\x80')
+        di += 1    
+    return True
+
+def annotateYAML(z): # perhaps this should be called annotate_map, since it's not yaml, but an internal python structure yet to become YAML
+    ticks = 0
+    file_offset = 16
+    z['loop_addr'] = 0
+    z['pcm_offset'] = 0
+    for k in z:
+        if k == 'version':
+            z.ca.items.pop(k, None) # this clears any existing EOL comment
+            z[k] = HexInt(z[k],width=2)
+            if z[k] == 1:
+                z.yaml_add_eol_comment("Version 1 is the only valid value at this time",key=k)
+            else:
+                z.yaml_add_eol_comment("!!! Invalid version",key=k)
+        elif k == 'fm_channel_mask':
+            z.ca.items.pop(k, None)
+            z[k] = BinaryInt(z[k],width=8,underscore=[4,1,0])
+            z.yaml_add_eol_comment("FM channels that are touched by this ZSM need to have a 1 here. Channel number 0 is the rightmost bit.",key=k)
+        elif k == 'psg_channel_mask':
+            z.ca.items.pop(k, None)
+            z[k] = BinaryInt(z[k],width=16,underscore=[4,1,0])
+            z.yaml_add_eol_comment("PSG channels that are touched by this ZSM need to have a 1 here. Channel number 0 is the rightmost bit.",key=k)
+        elif k == 'tick_rate':
+            z.ca.items.pop(k, None)
+            z[k] = ScalarInt(z[k])
+            z.yaml_add_eol_comment("Number of ticks per second",key=k)
+        elif k == 'reserved_header':
+            z.ca.items.pop(k, None)
+            z[k] = HexInt(z[k],width=4)
+            z.yaml_add_eol_comment("For future use",key=k)
+        elif k == 'data':
+            z.ca.items.pop(k, None) # clear any EOL comment, but we're not going to add another one here
+            psg_freq = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+            d = z[k]
+            di=0
+            while di < len(d): # iterate over the data block
+                if type(d[di]) is CommentedMap:
+                    for k2, v2 in d[di].items():
+                        if k2 == 'ym_write':
+                            file_offset += 1
+                            # Replace any existing comment
+                            d[di].ca.items.pop(k2,None)
+                            d[di].yaml_add_eol_comment("YM write block: {0:d} (0x{1:02x}) events".format(len(v2),len(v2)),key=k2)
+                            i2 = 0
+                            while i2 < len(v2):
+                                file_offset += 2
+                                # Remove any existing comments
+                                v2[i2].ca.items.pop('addr',None)
+                                v2[i2].ca.items.pop('data',None)
+                                # Normalize addr
+                                v2[i2]['addr'] = HexInt(v2[i2]['addr'],width=2)
+                                # Normalize data to hex unless overridden later
+                                v2[i2]['data'] = HexInt(v2[i2]['data'],width=2)
+                                if v2[i2]['addr'] == 0x01:
+                                    v2[i2].yaml_add_eol_comment("Test Register",key='addr')
+                                    if v2[i2]['data'] & 0x2:
+                                        v2[i2].yaml_add_eol_comment("LFO disable and hold",key='data')
+                                    else:
+                                        v2[i2].yaml_add_eol_comment("LFO enable",key='data')
+                                elif v2[i2]['addr'] == 0x08:
+                                    v2[i2].yaml_add_eol_comment("Key Control",key='addr')
+                                    if v2[i2]['data'] & 0b01111000 == 0:
+                                        v2[i2].yaml_add_eol_comment("Key off, channel {0:d}".format(v2[i2]['data'] & 0x7),key='data')
+                                    elif v2[i2]['data'] & 0b01111000 == 0b01111000:
+                                        v2[i2].yaml_add_eol_comment("Key on, channel {0:d}".format(v2[i2]['data'] & 0x7),key='data')
+                                    else:
+                                        v2[i2].yaml_add_eol_comment("Key mixed off/on, channel {0:d}".format(v2[i2]['data'] & 0x7),key='data')
+                                        v2[i2]['data'] = BinaryInt(v2[i2]['data'],width=8,underscore=[8,1,0])
+                                elif v2[i2]['addr'] == 0x0f:
+                                    v2[i2].yaml_add_eol_comment("Noise Control",key='addr')
+                                    v2[i2]['data'] = BinaryInt(v2[i2]['data'],width=8,underscore=[8,1,0])
+                                    if v2[i2]['data'] & 0b10000000 == 0:
+                                        v2[i2].yaml_add_eol_comment("Noise disable",key='data')
+                                    else:
+                                        v2[i2].yaml_add_eol_comment("Noise enable, frequency {0:d} (0x{1:02x})".format(v2[i2]['data'] & 0x1f,v2[i2]['data'] & 0x1f),key='data')
+                                elif v2[i2]['addr'] == 0x10:
+                                    v2[i2].yaml_add_eol_comment("Timer A High",key='addr')
+                                    v2[i2].yaml_add_eol_comment("Timer A = {0:d} (0x{1:03x}) + value written into addr 0x11".format(v2[i2]['data'] << 2,v2[i2]['data'] << 2),key='data')
+                                elif v2[i2]['addr'] == 0x11:
+                                    v2[i2].yaml_add_eol_comment("Timer A Low",key='addr')
+                                    v2[i2].yaml_add_eol_comment("Timer A = {0:d} (0x{1:02x}) + value written into addr 0x10".format(v2[i2]['data'] & 3,v2[i2]['data'] & 3),key='data')
+                                elif v2[i2]['addr'] == 0x12:
+                                    v2[i2].yaml_add_eol_comment("Timer B",key='addr')
+                                    v2[i2].yaml_add_eol_comment("{0:d}".format(v2[i2]['data']),key='data')
+                                elif v2[i2]['addr'] == 0x14:
+                                    v2[i2].yaml_add_eol_comment("IRQ Control",key='addr')
+                                    v2[i2].yaml_add_eol_comment("CSM={0:d} ACK={1:d} IRQEN={2:d} Start={3:d}".format((v2[i2]['data'] & 0x80) >> 7,(v2[i2]['data'] & 0x30) >> 4,(v2[i2]['data'] & 0x0c) >> 2,v2[i2]['data'] & 0x03),key='data')
+                                elif v2[i2]['addr'] == 0x18:
+                                    v2[i2].yaml_add_eol_comment("LFO frequency",key='addr')
+                                    n = v2[i2]['data']
+                                    lfo = ((((0x10 | (n & 0xf)) << (n >> 4))) / 2**36) * 3579545
+                                    v2[i2].yaml_add_eol_comment("{0:f} Hz".format(lfo),key='data')
+                                elif v2[i2]['addr'] == 0x19:
+                                    v2[i2].yaml_add_eol_comment("LFO amplitude",key='addr')
+                                    if v2[i2]['data'] & 0x80:
+                                        v2[i2].yaml_add_eol_comment("PMD: {0:d} (0x{1:02x})".format(v2[i2]['data'] & 0x7f, v2[i2]['data'] & 0x7f),key='data')
+                                    else:
+                                        v2[i2].yaml_add_eol_comment("AMD: {0:d} (0x{1:02x})".format(v2[i2]['data'], v2[i2]['data']),key='data')
+                                elif v2[i2]['addr'] == 0x1b:
+                                    v2[i2].yaml_add_eol_comment("CT/LFO Waveform",key='addr')
+                                    lfo = ('Saw','Square','Triangle','Noise')[v2[i2]['data'] & 0x03]
+                                    ct = ('','CT1 high, ','CT2 high, ','CT1+CT2 high, ')[(v2[i2]['data'] & 0x80) >> 7]
+                                    v2[i2].yaml_add_eol_comment("{0:s}{1:s}".format(ct, lfo),key='data')
+                                elif v2[i2]['addr'] & 0xf8 == 0x20:
+                                    v2[i2].yaml_add_eol_comment("Channel {0:d}: R/L Output, Feedback, Algorithm (RL_FB_CON)".format(v2[i2]['addr'] & 0x7),key='addr')
+                                    rl = ('No output','Left','Right','Left+Right')[(v2[i2]['data'] & 0xc0) >> 6]
+                                    fb = (v2[i2]['data'] & 0x38) >> 3
+                                    alg = (v2[i2]['data'] & 0x07)
+                                    v2[i2].yaml_add_eol_comment("{0:s}, Feedback {1:d}, Algorithm {2:d}".format(rl, fb, alg),key='data')
+                                elif v2[i2]['addr'] & 0xf8 == 0x28:
+                                    v2[i2].yaml_add_eol_comment("Channel {0:d}: Key code (KC)".format(v2[i2]['addr'] & 0x7),key='addr')
+                                    octave = (v2[i2]['data'] & 0xf0) >> 4
+                                    note = ('C#','D-','D#','Alternate D#','E-','F-','F#','Alternate F#','G-','G#','A-','Alternate A-','A#','B-','C-','Alternate C-')[(v2[i2]['data'] & 0x0f)]
+                                    v2[i2].yaml_add_eol_comment("Note {0:s}{1:d}".format(note, octave),key='data')
+                                elif v2[i2]['addr'] & 0xf8 == 0x30:
+                                    v2[i2].yaml_add_eol_comment("Channel {0:d}: Key fraction (KF)".format(v2[i2]['addr'] & 0x7),key='addr')
+                                    cents = ((v2[i2]['data'] & 0xfc) >> 2)*100 / 64
+                                    v2[i2].yaml_add_eol_comment("+{0:.2f} cents".format(cents),key='data')
+                                elif v2[i2]['addr'] & 0xf8 == 0x38:
+                                    v2[i2].yaml_add_eol_comment("Channel {0:d}: Modulation Sensitivity (PMS_AMS)".format(v2[i2]['addr'] & 0x7),key='addr')
+                                    pms = (v2[i2]['data'] & 0x70) >> 4
+                                    ams = (v2[i2]['data'] & 0x03)
+                                    v2[i2].yaml_add_eol_comment("PMS: {0:d}, AMS: {1:d}".format(pms,ams),key='data')
+                                else:
+                                    channel = v2[i2]['addr'] & 0x07
+                                    op = ('M1','M2','C1','C2')[(v2[i2]['addr'] & 0x18) >> 3]
+                                    if v2[i2]['addr'] & 0xe0 == 0x40:
+                                        v2[i2].yaml_add_eol_comment("Channel {0:d} op {1:s}: Fine Detune, Multiplier (DT1_MUL)".format(channel,op),key='addr')
+                                        dt1 = (v2[i2]['data'] & 0x70) >> 4
+                                        mul = (v2[i2]['data'] & 0x03)
+                                        v2[i2].yaml_add_eol_comment("DT1: {0:d}, MUL: {1:d}".format(dt1,mul),key='data')
+                                    elif v2[i2]['addr'] & 0xe0 == 0x60:
+                                        v2[i2].yaml_add_eol_comment("Channel {0:d} op {1:s}: Volume Attenuation (TL)".format(channel,op),key='addr')
+                                        tl = (v2[i2]['data'] & 0x7f) * -0.75
+                                        if tl == -95.25:
+                                            tl = float('-Infinity')
+                                        v2[i2].yaml_add_eol_comment("Attenuation: {0:.2f} dB".format(tl),key='data')
+                                    elif v2[i2]['addr'] & 0xe0 == 0x80:
+                                        v2[i2].yaml_add_eol_comment("Channel {0:d} op {1:s}: Key Scaling, Attack Rate (KS_AR)".format(channel,op),key='addr')
+                                        ks = (v2[i2]['data'] & 0xc0) >> 6
+                                        ar = v2[i2]['data'] & 0x1f 
+                                        rh = (ar & 0x1e) >> 1
+                                        rl = (ar & 0x01) << 1
+                                        rate = (10**4.202682)/(2**rh)*(1/(1+0.25*rl))
+                                        if (ar) < 2:
+                                            rate = float('Infinity')
+                                        v2[i2].yaml_add_eol_comment("KS: {0}, Base Attack Rate: {1:.2f} ms".format(ks,rate),key='data')
+                                    elif v2[i2]['addr'] & 0xe0 == 0xa0:
+                                        v2[i2].yaml_add_eol_comment("Channel {0:d} op {1:s}: AM Enable, Decay Rate 1 (AMSEN_D1R)".format(channel,op),key='addr')
+                                        amsen = ('disabled','enabled')[(v2[i2]['data'] & 0x80) >> 7]
+                                        d1r = v2[i2]['data'] & 0x1f 
+                                        rh = (d1r & 0x1e) >> 1
+                                        rl = (d1r & 0x01) << 1
+                                        rate = (10**4.202682)/(2**rh)*(1/(1+0.25*rl))*13.821907059
+                                        if (d1r) < 2:
+                                            rate = float('Infinity')
+                                        v2[i2].yaml_add_eol_comment("AM: {0}, Base D1 Rate: {1:.2f} ms".format(amsen,rate),key='data')
+                                    elif v2[i2]['addr'] & 0xe0 == 0xc0:
+                                        v2[i2].yaml_add_eol_comment("Channel {0:d} op {1:s}: Coarse Detune, Decay Rate 2 (DT2_D2R)".format(channel,op),key='addr')
+                                        dt2 = (v2[i2]['data'] & 0xc0) >> 6
+                                        d2r = v2[i2]['data'] & 0x1f 
+                                        rh = (d2r & 0x1e) >> 1
+                                        rl = (d2r & 0x01) << 1
+                                        rate = (10**4.202682)/(2**rh)*(1/(1+0.25*rl))*13.821907059
+                                        if (d2r) < 2:
+                                            rate = float('Infinity')
+                                        v2[i2].yaml_add_eol_comment("DT2: {0:d}, Base D2 Rate: {1:.2f} ms".format(dt2,rate),key='data')
+                                    elif v2[i2]['addr'] & 0xe0 == 0xe0:
+                                        v2[i2].yaml_add_eol_comment("Channel {0:d} op {1:s}: Decay 1 Level, Release Rate (D1L_RR)".format(channel,op),key='addr')
+                                        d1l = (v2[i2]['data'] & 0xf0) >> 4
+                                        rr = v2[i2]['data'] & 0x0f 
+                                        rh = rr
+                                        rl = 2
+                                        rate = (10**4.202682)/(2**rh)*(1/(1+0.25*rl))*13.821907059
+                                        if (rr == 0):
+                                            rate = float('Infinity')
+                                        v2[i2].yaml_add_eol_comment("D1L: {0:d}, Base Release Rate: {1:.2f} ms (0x{2:02x})".format(dt2,rate,rr),key='data')
+                                i2 = i2 + 1
+                            # End ym_write entry
+                        elif k2 == 'psg_write':
+                            # We don't advance file_offset here since this is a pseudo-event
+                            # Replace any existing comment
+                            d[di].ca.items.pop(k2,None)
+                            d[di].yaml_add_eol_comment("PSG write block: {0:d} (0x{1:02x}) events".format(len(v2),len(v2)),key=k2)
+                            i2 = 0
+                            while i2 < len(v2):
+                                file_offset += 2
+                                # Remove any existing comments
+                                v2[i2].ca.items.pop('addr',None)
+                                v2[i2].ca.items.pop('data',None)
+                                # Normalize addr
+                                v2[i2]['addr'] = HexInt(v2[i2]['addr'],width=2)
+                                # Normalize data to hex unless overridden later
+                                v2[i2]['data'] = HexInt(v2[i2]['data'],width=2)
+                                channel = (v2[i2]['addr'] & 0x3c) >> 2
+                                attr = v2[i2]['addr'] & 0x03
+                                if attr == 0x00 or attr == 0x01:
+                                    if attr == 0x00:
+                                        v2[i2].yaml_add_eol_comment("Channel {0:d} LSB of frequency".format(channel),key='addr')
+                                        psg_freq[channel] = (psg_freq[channel] & 0xff00) | v2[i2]['data']
+                                    else:
+                                        v2[i2].yaml_add_eol_comment("Channel {0:d} MSB of frequency".format(channel),key='addr')
+                                        psg_freq[channel] = (psg_freq[channel] & 0x00ff) | (v2[i2]['data'] << 8)
+                                    # Look ahead, if next event is a paired frequency change, this write is transient, and is not representative of the note being played
+                                    if i2+1 < len(v2) and ((v2[i2]['addr'] & 0x3e) == (v2[i2+1]['addr'] & 0x3e)):
+                                        v2[i2].yaml_add_eol_comment("(partial change)",key='data')
+                                    else:
+                                        # convert PSG freq to Hz
+                                        hz = psg_freq[channel] * (48828.125 / (2**17))
+                                        # convert Hz to MIDI note + fraction
+                                        notenum = math.log(hz,2**(1/12)) - 36.37631656229588 # normalize notenum so C-0 is 12
+                                        note = ('C-','C#','D-','D#','E-','F-','F#','G-','G#','A-','A#','B-')[int(notenum+0.5) % 12]
+                                        octave = int((int(notenum+0.5)/12)-1)
+                                        cents = 100 * (notenum - int(notenum+0.5))
+                                        v2[i2].yaml_add_eol_comment("Note: {0:s}{1:d} {2:+.2f} ({3:.1f} Hz, 0x{4:x} VERA)".format(note,octave,cents,hz,int(psg_freq[channel])),key='data')
+                                elif attr == 0x02:
+                                    v2[i2].yaml_add_eol_comment("Channel {0:d} R+L Output, Volume".format(channel),key='addr')
+                                    rl = ('No output (Phase Reset)','Left','Right','Left+Right')[(v2[i2]['data'] & 0xc0) >> 6]
+                                    vol = v2[i2]['data'] & 0x3f
+                                    v2[i2].yaml_add_eol_comment("{0:s}, Volume {1:d} (0x{1:02x})".format(rl,vol),key='data')
+                                else: # 0x03
+                                    v2[i2].yaml_add_eol_comment("Channel {0:d} Waveform, Pulse width".format(channel),key='addr')
+                                    wf = ('Pulse','Sawtooth','Triangle','Noise')[(v2[i2]['data'] & 0xc0) >> 6]
+                                    if wf == 'Pulse':
+                                        pw = v2[i2]['data'] & 0x3f
+                                        v2[i2].yaml_add_eol_comment("{0:s}, width {1:.1f}% (0x{2:0x})".format(wf,pw*(50/64),pw),key='data')
+                                    else:
+                                        v2[i2].yaml_add_eol_comment("{0:s}".format(wf),key='data')
+
+                                i2 = i2 + 1
+                        elif k2 == 'delay':
+                            file_offset += 1
+                            ticks += v2
+                            tsec = ticks/z['tick_rate']
+                            tmin = int(tsec/60)
+                            tsec -= (tmin*60)
+                            dsec = v2/z['tick_rate']
+
+                            d[di].yaml_add_eol_comment("{0:d} ticks ({1:.2f}s), total {2:d} ({3:d}m{4:05.2f}s) ".format(v2,dsec,ticks,tmin,tsec),key=k2)
+                        else:
+                            print (k2)
+                elif type(d[di]) is str:
+                    if d[di] == 'loop':
+                        tsec = ticks/z['tick_rate']
+                        tmin = int(tsec/60)
+                        tsec -= (tmin*60)
+                        d.yaml_add_eol_comment("Loop start: {0:d}m{1:04.1f}s at byte offset {2:d} (0x{2:02x}) ".format(tmin,tsec,file_offset),key=di)
+                        # Put this in to pass state to export
+                        z['loop_addr'] = HexInt(file_offset,width=6)
+                    elif d[di] == 'eod':
+                        file_offset += 1
+                        d.yaml_add_eol_comment("End of ZSM data",key=di)
+                    
+                else:
+                    print(type(d[di]))
+                di += 1
+
+        elif k == 'pcm_data':
+            z['pcm_offset'] = file_offset
+            z.ca.items.pop('pcm_data', None) # clear any EOL comment, but we're not going to add another one here
+
+    return
+
+yaml = ruamel.yaml.YAML()
+y = ruamel.yaml.load("""zsm:\n  version: 0\n""", ruamel.yaml.RoundTripLoader)
+
+parser = argparse.ArgumentParser()
+inputgroup = parser.add_mutually_exclusive_group()
+outputgroup = parser.add_mutually_exclusive_group()
+inputgroup.add_argument("-i", metavar="input.zsm", type=argparse.FileType('rb'), help='Input ZSM file')
+inputgroup.add_argument("-c", metavar="input.yml", type=argparse.FileType('r'), help='Compile structured text to ZSM')
+outputgroup.add_argument("-o", metavar="output.zsm", type=argparse.FileType('wb'), help='Output ZSM file')
+outputgroup.add_argument("-d", metavar="output.yml", type=argparse.FileType('w'), help='Decompile a ZSM to structured text')
+
+
+args = parser.parse_args()
+
+
+if (args.i is not None): # Import a ZSM
+    if not ZSMtoYAML(args.i,y['zsm']):
+        warnings.warn("ZSM import problem: format/version mismatch or unexpected EOF, trying to continue anyway")
+    # Round-trip it in YAML so the entire structure is upgraded and comments can be attached
+    buf = bytes()
+    buff = io.BytesIO(buf)
+    yaml.dump(y,buff)
+    buff.seek(0)
+    y = ruamel.yaml.load(buff, ruamel.yaml.RoundTripLoader)
+
+if (args.c is not None): # Import a YAML
+    y = ruamel.yaml.load(args.c, ruamel.yaml.RoundTripLoader)
+    
+annotateYAML(y['zsm']) # Comment everything, convert the representation of numbers, etc. to improve readability
+
+if (args.o is not None): # Export a ZSM
+    if not YAMLtoZSM(args.o,y['zsm']):
+        warnings.warn("Problem exporting ZSM file, it's probably incomplete")
+
+if (args.d is not None): # Export a YAML
+    del y['zsm']['pcm_offset']
+    del y['zsm']['loop_addr']
+    yaml.dump(y,args.d)
+
