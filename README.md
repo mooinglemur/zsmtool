@@ -18,5 +18,8 @@ options:
 ```
 ## Requirements
 * Python 3.8 or later
-* ruamel.yaml - most Linux distributions have this in their package repos
-
+* ruamel.yaml - most Linux distributions have this module in their package repos
+    * Ubuntu/Debian: `sudo apt install python3-ruamel.yaml`
+    * RHEL/Rocky/Fedora: `sudo dnf install python3-ruamel-yaml`
+    * Gentoo: `sudo emerge -av dev-python/ruamel-yaml`
+    * Arch: `sudo pacman -S python-ruamel-yaml`
