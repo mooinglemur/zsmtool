@@ -333,7 +333,7 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                         rate = (10**4.202682)/(2**rh)*(1/(1+0.25*rl))*13.821907059
                                         if (rr == 0):
                                             rate = float('Infinity')
-                                        v2[i2].yaml_add_eol_comment("D1L: {0:d}, Base Release Rate: {1:.2f} ms (0x{2:02x})".format(dt2,rate,rr),key='data')
+                                        v2[i2].yaml_add_eol_comment("D1L: {0:d}, Base Release Rate: {1:.2f} ms (0x{2:02x})".format(d1l,rate,rr),key='data')
                                 i2 = i2 + 1
                             # End ym_write entry
                         elif k2 == 'psg_write':
