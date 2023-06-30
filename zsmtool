@@ -57,10 +57,17 @@ def ZSMtoYAML(ifh,z):
                 psg_write_group.append({'addr': HexInt(b,width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
             elif b == 0x40: # EXT
                 chn = unpack("B",ifh.read(1))[0]
-                ext = {'channel': HexInt((chn >> 6) & 0x03,width=2), 'data': []}
-                for i in range(chn & 0x3f):
-                    ext['data'].append(unpack("B",ifh.read(1))[0])
-                d.append({'ext_data': ext})
+                channel = (chn >> 6) & 0x03
+                if channel == 0: # PCM data
+                    pcm_write = []
+                    for i in range((chn & 0x3f) >> 1):
+                        pcm_write.append({'addr': HexInt(unpack("B",ifh.read(1))[0],width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
+                    d.append({'pcm_write': pcm_write})
+                else: # other EXT command
+                    ext = {'channel': HexInt(channel,width=2), 'data': []}
+                    for i in range(chn & 0x3f):
+                        ext['data'].append(unpack("B",ifh.read(1))[0])
+                    d.append({'ext_data': ext})
             elif b < 0x80: # a series of YM writes b & 0x3f bytes long follows
                 ymw = []
                 for i in range(b & 0x3f):
@@ -73,9 +80,8 @@ def ZSMtoYAML(ifh,z):
                 d.append("eod")
                 del z['loop_addr']
                 if z['pcm_offset'] > 0:
-                    if ifh.tell == z['pcm_offset']:
+                    if ifh.tell() == z['pcm_offset']:
                         state = state+1
-                        z.append({'pcm_data': []})
                     else: # PCM data doesn't line up, error
                         return False                        
                 else:
@@ -84,7 +90,22 @@ def ZSMtoYAML(ifh,z):
             else: # Delay
                 d.append({'delay': HexInt(b & 0x7F,width=2)})
         elif state == 2: # PCM data
-            z['pcm_data'].append(HexInt(unpack("B",ifh.read(1))[0],width=2))
+            if byte != b'P':
+                return False
+            if ifh.read(2) != b'CM':
+                return False
+            last_inst = unpack("B",ifh.read(1))[0]
+            insts = []
+            for i in range(last_inst+1):
+                if ifh.read(1) != b'\x02':
+                    return False
+                if i != unpack("B",ifh.read(1))[0]:
+                    return False
+                ioffset = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
+                ilength = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
+                insts.append({'offset': ioffset, 'length': ilength})
+            d.append({'pcm_insts': insts})
+            d.append({'pcm_data': [HexInt(num, width=2) for num in list(ifh.read())]})
         else:
             return False
     
@@ -142,11 +163,40 @@ def YAMLtoZSM(ofh,z):
                         ofh.write(pack("B",v2[i2]['addr']))
                         ofh.write(pack("B",v2[i2]['data']))
                         i2 += 1
+                elif k2 == 'pcm_write':
+                    if len(v2) > 0x1f:
+                        warnings.warn("Excessive run length of PCM write block")
+                        return False
+                    # Write out the EXT command and channel+length
+                    ofh.write(b'\x40')
+                    ofh.write(pack("B",len(v2) * 2))
+                    i2 = 0
+                    while i2 < len(v2):
+                        # Write out the PCM events themselves
+                        ofh.write(pack("B",v2[i2]['addr']))
+                        ofh.write(pack("B",v2[i2]['data']))
+                        i2 += 1
                 elif k2 == 'delay':
                     if v2 > 0x7f:
                         warnings.warn("Delay out of bounds")
                         return False
                     ofh.write(pack("B",v2 + 0x80))
+                elif k2 == 'pcm_insts':
+                    # Write out the magic for the PCM instrument table
+                    ofh.write(b"PCM")
+                    ofh.write(pack("B",len(v2)-1))
+                    i2 = 0
+                    while i2 < len(v2):
+                        # Write out the instruments themselves (number, offset, length)
+                        ofh.write(b'\x02')
+                        ofh.write(pack("B",i2))
+                        ofh.write(pack("<H",v2[i2]['offset'] & 0xffff))
+                        ofh.write(pack("B",(v2[i2]['offset'] & 0xff0000) >> 16))
+                        ofh.write(pack("<H",v2[i2]['length'] & 0xffff))
+                        ofh.write(pack("B",(v2[i2]['length'] & 0xff0000) >> 16))
+                        i2 += 1
+                elif k2 == 'pcm_data':
+                    ofh.write(bytes(v2))
                 else:
                     warnings.warn("Unrecognized token: {0}".format(k2))
                     return False
@@ -190,6 +240,9 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
         elif k == 'data':
             z.ca.items.pop(k, None) # clear any EOL comment, but we're not going to add another one here
             psg_freq = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+            pcm_ch = 1
+            pcm_depth = 0
+            pcm_rate = 0
             d = z[k]
             di=0
             while di < len(d): # iterate over the data block
@@ -382,10 +435,52 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                     wf = ('Pulse','Sawtooth','Triangle','Noise')[(v2[i2]['data'] & 0xc0) >> 6]
                                     if wf == 'Pulse':
                                         pw = v2[i2]['data'] & 0x3f
-                                        v2[i2].yaml_add_eol_comment("{0:s}, width {1:.1f}% (0x{2:0x})".format(wf,pw*(50/64),pw),key='data')
+                                        v2[i2].yaml_add_eol_comment("{0:s}, width {1:.1f}% (0x{2:0x})".format(wf,(pw+1)*(50/64),pw),key='data')
                                     else:
                                         v2[i2].yaml_add_eol_comment("{0:s}".format(wf),key='data')
 
+                                i2 = i2 + 1
+                        elif k2 == 'pcm_write':
+                            file_offset += 2
+                            # Replace any existing comment
+                            d[di].ca.items.pop(k2,None)
+                            d[di].yaml_add_eol_comment("PCM write block: {0:d} (0x{1:02x}) events".format(len(v2),len(v2)),key=k2)
+                            i2 = 0
+                            while i2 < len(v2):
+                                file_offset += 2
+                                # Remove any existing comments
+                                v2[i2].ca.items.pop('addr',None)
+                                v2[i2].ca.items.pop('data',None)
+                                # Normalize addr
+                                v2[i2]['addr'] = HexInt(v2[i2]['addr'],width=2)
+                                # Normalize data to hex unless overridden later
+                                v2[i2]['data'] = HexInt(v2[i2]['data'],width=2)
+                                if v2[i2]['addr'] == 0x00:
+                                    v2[i2].yaml_add_eol_comment("PCM Ctrl",key='addr')
+                                    dcmt = []
+                                    if v2[i2]['data'] & 0x80:
+                                        dcmt.append("Reset FIFO")
+                                    if v2[i2]['data'] & 0x20:
+                                        pcm_depth = 16
+                                    else:
+                                        pcm_depth = 8
+                                    if v2[i2]['data'] & 0x10:
+                                        pcm_ch = 2
+                                    else:
+                                        pcm_ch = 1
+                                    dcmt.append(("{0:d}-bit".format(pcm_depth))+(" stereo" if pcm_ch == 2 else " mono"))
+                                    vol = v2[i2]['data'] & 0x0f
+                                    db = ('silent', '-18.0dB', '-15.0dB', '-13.3dB', '-12.0dB', '-11.1dB', '-10.3dB', '-9.0dB', '-7.6dB', '-6.6dB', '-5.5dB', '-4.4dB', '-3.3dB', '-2.3dB', '-1.2dB', '-0.0dB')[vol]
+                                    dcmt.append("Volume: {0:d} (0x{0:02x}) {1:s}".format(vol,db) )
+                                    v2[i2].yaml_add_eol_comment(", ".join(dcmt),key='data')
+                                elif v2[i2]['addr'] == 0x01:
+                                    v2[i2].yaml_add_eol_comment("PCM Rate",key='addr')
+                                    pcm_rate = v2[i2]['data'] * 381.469726563
+                                    v2[i2].yaml_add_eol_comment("{0:.2f} Hz".format(pcm_rate),key='data')
+                                elif v2[i2]['addr'] == 0x02:
+                                    v2[i2].yaml_add_eol_comment("PCM Instrument Trigger",key='addr')
+                                    duration = ( next((item for item in d if 'pcm_insts' in item))['pcm_insts'][v2[i2]['data']]['length'] / pcm_rate) * 8000 / pcm_ch / pcm_depth # Milliseconds
+                                    v2[i2].yaml_add_eol_comment("Playback duration: {0:.2f} ms".format(duration),key='data')
                                 i2 = i2 + 1
                         elif k2 == 'delay':
                             file_offset += 1
@@ -396,6 +491,11 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                             dsec = v2/z['tick_rate']
 
                             d[di].yaml_add_eol_comment("{0:d} ticks ({1:.2f}s), total {2:d} ({3:d}m{4:05.2f}s) ".format(v2,dsec,ticks,tmin,tsec),key=k2)
+                        elif k2 == 'pcm_insts':
+                            d[di].ca.items.pop(k2,None) # clear any EOL comment, but we're not going to add another one here
+                        elif k2 == 'pcm_data':
+                            z['pcm_offset'] = file_offset
+                            d[di].ca.items.pop(k2,None) # clear any EOL comment, but we're not going to add another one here
                         else:
                             print (k2)
                 elif type(d[di]) is str:
@@ -409,14 +509,10 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                     elif d[di] == 'eod':
                         file_offset += 1
                         d.yaml_add_eol_comment("End of ZSM data",key=di)
-                    
                 else:
                     print(type(d[di]))
                 di += 1
 
-        elif k == 'pcm_data':
-            z['pcm_offset'] = file_offset
-            z.ca.items.pop('pcm_data', None) # clear any EOL comment, but we're not going to add another one here
 
     return
 
