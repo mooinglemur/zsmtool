@@ -97,15 +97,14 @@ def ZSMtoYAML(ifh,z):
             last_inst = unpack("B",ifh.read(1))[0]
             insts = []
             for i in range(last_inst+1):
-                if ifh.read(1) != b'\x02':
-                    return False
                 if i != unpack("B",ifh.read(1))[0]:
                     return False
+                igeom = HexInt(unpack("B",ifh.read(1))[0],width=2)
                 ioffset = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
                 ilength = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
-                insts.append({'offset': ioffset, 'length': ilength})
+                insts.append({'geometry': igeom, 'offset': ioffset, 'length': ilength})
             d.append({'pcm_insts': insts})
-            d.append({'pcm_data': [HexInt(num, width=2) for num in list(ifh.read())]})
+            d.append({'pcm_data': [{'value': HexInt(num, width=2)} for num in list(ifh.read())]})
         else:
             return False
     
@@ -187,16 +186,19 @@ def YAMLtoZSM(ofh,z):
                     ofh.write(pack("B",len(v2)-1))
                     i2 = 0
                     while i2 < len(v2):
-                        # Write out the instruments themselves (number, offset, length)
-                        ofh.write(b'\x02')
+                        # Write out the instruments themselves (number, geom, offset, length)
                         ofh.write(pack("B",i2))
+                        ofh.write(pack("B",v2[i2]['geometry'] & 0x30))
                         ofh.write(pack("<H",v2[i2]['offset'] & 0xffff))
                         ofh.write(pack("B",(v2[i2]['offset'] & 0xff0000) >> 16))
                         ofh.write(pack("<H",v2[i2]['length'] & 0xffff))
                         ofh.write(pack("B",(v2[i2]['length'] & 0xff0000) >> 16))
                         i2 += 1
                 elif k2 == 'pcm_data':
-                    ofh.write(bytes(v2))
+                    i2 = 0
+                    while i2 < len(v2):
+                        ofh.write(pack("B",v2[i2]['value'] & 0xff))
+                        i2 += 1
                 else:
                     warnings.warn("Unrecognized token: {0}".format(k2))
                     return False
@@ -387,7 +389,7 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                         if (rr == 0):
                                             rate = float('Infinity')
                                         v2[i2].yaml_add_eol_comment("D1L: {0:d}, Base Release Rate: {1:.2f} ms (0x{2:02x})".format(d1l,rate,rr),key='data')
-                                i2 = i2 + 1
+                                i2 += 1
                             # End ym_write entry
                         elif k2 == 'psg_write':
                             # We don't advance file_offset here since this is a pseudo-event
@@ -439,7 +441,7 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                     else:
                                         v2[i2].yaml_add_eol_comment("{0:s}".format(wf),key='data')
 
-                                i2 = i2 + 1
+                                i2 += 1
                         elif k2 == 'pcm_write':
                             file_offset += 2
                             # Replace any existing comment
@@ -460,15 +462,6 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                     dcmt = []
                                     if v2[i2]['data'] & 0x80:
                                         dcmt.append("Reset FIFO")
-                                    if v2[i2]['data'] & 0x20:
-                                        pcm_depth = 16
-                                    else:
-                                        pcm_depth = 8
-                                    if v2[i2]['data'] & 0x10:
-                                        pcm_ch = 2
-                                    else:
-                                        pcm_ch = 1
-                                    dcmt.append(("{0:d}-bit".format(pcm_depth))+(" stereo" if pcm_ch == 2 else " mono"))
                                     vol = v2[i2]['data'] & 0x0f
                                     db = ('silent', '-18.0dB', '-15.0dB', '-13.3dB', '-12.0dB', '-11.1dB', '-10.3dB', '-9.0dB', '-7.6dB', '-6.6dB', '-5.5dB', '-4.4dB', '-3.3dB', '-2.3dB', '-1.2dB', '-0.0dB')[vol]
                                     dcmt.append("Volume: {0:d} (0x{0:02x}) {1:s}".format(vol,db) )
@@ -479,9 +472,12 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                     v2[i2].yaml_add_eol_comment("{0:.2f} Hz".format(pcm_rate),key='data')
                                 elif v2[i2]['addr'] == 0x02:
                                     v2[i2].yaml_add_eol_comment("PCM Instrument Trigger",key='addr')
-                                    duration = ( next((item for item in d if 'pcm_insts' in item))['pcm_insts'][v2[i2]['data']]['length'] / pcm_rate) * 8000 / pcm_ch / pcm_depth # Milliseconds
+                                    inst = next((item for item in d if 'pcm_insts' in item))['pcm_insts'][v2[i2]['data']]
+                                    pcm_ch = 2 if inst['geometry'] & 0x10 else 1
+                                    pcm_depth = 16 if inst['geometry'] & 0x20 else 8
+                                    duration = (inst['length'] / pcm_rate) * 8000 / pcm_ch / pcm_depth # Milliseconds
                                     v2[i2].yaml_add_eol_comment("Playback duration: {0:.2f} ms".format(duration),key='data')
-                                i2 = i2 + 1
+                                i2 += 1
                         elif k2 == 'delay':
                             file_offset += 1
                             ticks += v2
@@ -489,13 +485,24 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                             tmin = int(tsec/60)
                             tsec -= (tmin*60)
                             dsec = v2/z['tick_rate']
-
                             d[di].yaml_add_eol_comment("{0:d} ticks ({1:.2f}s), total {2:d} ({3:d}m{4:05.2f}s) ".format(v2,dsec,ticks,tmin,tsec),key=k2)
                         elif k2 == 'pcm_insts':
-                            d[di].ca.items.pop(k2,None) # clear any EOL comment, but we're not going to add another one here
+                            d[di].ca.items.pop(k2,None)
+                            d[di].yaml_add_eol_comment("Instrument definitions",key=k2)
+                            i2 = 0
+                            while i2 < len(v2):
+                                pcm_ch = 2 if v2[i2]['geometry'] & 0x10 else 1
+                                pcm_depth = 16 if v2[i2]['geometry'] & 0x20 else 8
+                                cmt = ("Instrument 0x{0:02x}, ".format(i2))+("{0:d}-bit".format(pcm_depth))+(" stereo" if pcm_ch == 2 else " mono")
+                                v2[i2].yaml_add_eol_comment(cmt,key='geometry')
+                                i2 += 1
                         elif k2 == 'pcm_data':
                             z['pcm_offset'] = file_offset
-                            d[di].ca.items.pop(k2,None) # clear any EOL comment, but we're not going to add another one here
+                            d[di].ca.items.pop(k2,None)
+                            i2 = 0
+                            while i2 < len(v2):
+                                v2[i2].yaml_add_eol_comment("Offset 0x{0:06x}".format(i2),key='value')
+                                i2 += 16
                         else:
                             print (k2)
                 elif type(d[di]) is str:
