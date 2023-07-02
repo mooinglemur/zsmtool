@@ -102,7 +102,10 @@ def ZSMtoYAML(ifh,z):
                 igeom = HexInt(unpack("B",ifh.read(1))[0],width=2)
                 ioffset = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
                 ilength = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
-                insts.append({'geometry': igeom, 'offset': ioffset, 'length': ilength})
+                ifeat = HexInt(unpack("B",ifh.read(1))[0],width=2)
+                iloop = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
+                ires = HexInt(unpack("<L",ifh.read(4))[0],width=8)
+                insts.append({'geometry': igeom, 'offset': ioffset, 'length': ilength, 'features': ifeat, 'loop_point': iloop, 'reserved': ires})
             d.append({'pcm_insts': insts})
             d.append({'pcm_data': [{'value': HexInt(num, width=2)} for num in list(ifh.read())]})
         else:
@@ -186,13 +189,17 @@ def YAMLtoZSM(ofh,z):
                     ofh.write(pack("B",len(v2)-1))
                     i2 = 0
                     while i2 < len(v2):
-                        # Write out the instruments themselves (number, geom, offset, length)
+                        # Write out the instruments themselves (number, geom, offset, length, etc)
                         ofh.write(pack("B",i2))
                         ofh.write(pack("B",v2[i2]['geometry'] & 0x30))
                         ofh.write(pack("<H",v2[i2]['offset'] & 0xffff))
                         ofh.write(pack("B",(v2[i2]['offset'] & 0xff0000) >> 16))
                         ofh.write(pack("<H",v2[i2]['length'] & 0xffff))
                         ofh.write(pack("B",(v2[i2]['length'] & 0xff0000) >> 16))
+                        ofh.write(pack("B",v2[i2]['features']))
+                        ofh.write(pack("<H",v2[i2]['loop_point'] & 0xffff))
+                        ofh.write(pack("B",(v2[i2]['loop_point'] & 0xff0000) >> 16))
+                        ofh.write(pack("<L",v2[i2]['reserved']))
                         i2 += 1
                 elif k2 == 'pcm_data':
                     i2 = 0
