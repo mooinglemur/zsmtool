@@ -63,6 +63,11 @@ def ZSMtoYAML(ifh,z):
                     for i in range((chn & 0x3f) >> 1):
                         pcm_write.append({'addr': HexInt(unpack("B",ifh.read(1))[0],width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
                     d.append({'pcm_write': pcm_write})
+                elif channel == 2: # Sync data
+                    sync_event = []
+                    for i in range((chn & 0x3f) >> 1):
+                        sync_event.append({'type': HexInt(unpack("B",ifh.read(1))[0],width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
+                    d.append({'sync_event': sync_event})
                 else: # other EXT command
                     ext = {'channel': HexInt(channel,width=2), 'data': []}
                     for i in range(chn & 0x3f):
@@ -176,6 +181,19 @@ def YAMLtoZSM(ofh,z):
                     while i2 < len(v2):
                         # Write out the PCM events themselves
                         ofh.write(pack("B",v2[i2]['addr']))
+                        ofh.write(pack("B",v2[i2]['data']))
+                        i2 += 1
+                elif k2 == 'sync_event':
+                    if len(v2) > 0x1f:
+                        warnings.warn("Excessive run length of sync write block")
+                        return False
+                    # Write out the EXT command and channel+length
+                    ofh.write(b'\x40')
+                    ofh.write(pack("B",(len(v2) * 2)|0x80))
+                    i2 = 0
+                    while i2 < len(v2):
+                        # Write out the sync events themselves
+                        ofh.write(pack("B",v2[i2]['type']))
                         ofh.write(pack("B",v2[i2]['data']))
                         i2 += 1
                 elif k2 == 'delay':
@@ -484,6 +502,25 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                     pcm_depth = 16 if inst['geometry'] & 0x20 else 8
                                     duration = (inst['length'] / pcm_rate) * 8000 / pcm_ch / pcm_depth # Milliseconds
                                     v2[i2].yaml_add_eol_comment("Playback duration: {0:.2f} ms".format(duration),key='data')
+                                i2 += 1
+                        elif k2 == 'sync_event':
+                            file_offset += 2
+                            # Replace any existing comment
+                            d[di].ca.items.pop(k2,None)
+                            d[di].yaml_add_eol_comment("Sync event write block: {0:d} (0x{1:02x}) events".format(len(v2),len(v2)),key=k2)
+                            i2 = 0
+                            while i2 < len(v2):
+                                file_offset += 2
+                                # Remove any existing comments
+                                v2[i2].ca.items.pop('type',None)
+                                v2[i2].ca.items.pop('data',None)
+                                # Normalize type
+                                v2[i2]['type'] = HexInt(v2[i2]['type'],width=2)
+                                # Normalize data to hex unless overridden later
+                                v2[i2]['data'] = HexInt(v2[i2]['data'],width=2)
+                                if v2[i2]['type'] == 0x00:
+                                    v2[i2].yaml_add_eol_comment("Generic sync message",key='type')
+                                    v2[i2].yaml_add_eol_comment("Raw value",key='data')
                                 i2 += 1
                         elif k2 == 'delay':
                             file_offset += 1
