@@ -567,8 +567,8 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
 
     return
 
-yaml = ruamel.yaml.YAML()
-y = ruamel.yaml.load("""zsm:\n  version: 0\n""", ruamel.yaml.RoundTripLoader)
+yaml = ruamel.yaml.YAML(typ='rt')
+y = yaml.load("""zsm:\n  version: 0\n""")
 
 parser = argparse.ArgumentParser()
 inputgroup = parser.add_mutually_exclusive_group()
@@ -590,10 +590,10 @@ if (args.i is not None): # Import a ZSM
     buff = io.BytesIO(buf)
     yaml.dump(y,buff)
     buff.seek(0)
-    y = ruamel.yaml.load(buff, ruamel.yaml.RoundTripLoader)
+    y = yaml.load(buff)
 
 if (args.c is not None): # Import a YAML
-    y = ruamel.yaml.load(args.c, ruamel.yaml.RoundTripLoader)
+    y = yaml.load(args.c)
     
 annotateYAML(y['zsm']) # Comment everything, convert the representation of numbers, etc. to improve readability
 
