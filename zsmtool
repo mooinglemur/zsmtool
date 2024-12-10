@@ -6,9 +6,415 @@ import ruamel.yaml
 import warnings
 import io
 import math
+import mido
 from ruamel.yaml.scalarint import HexInt, BinaryInt, ScalarInt
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from struct import unpack, pack
+
+mididrum = [
+    *(['(MIDI drum out of range)'] * 25),
+    'Snare Roll',
+    'Finger Snap',
+    'High Q',
+    'Slap',
+    'Scratch Pull',
+    'Scratch Push',
+    'Sticks',
+    'Square Click',
+    'Metronome Bell',
+    'Metronome Click',
+    'Acoustic Bass Drum',
+    'Electric Bass Drum',
+    'Side Stick',
+    'Acoustic Snare',
+    'Hand Clap',
+    'Electric Snare',
+    'Low Floor Tom',
+    'Closed Hi-Hat',
+    'High Floor Tom',
+    'Pedal Hi-Hat',
+    'Low Tom',
+    'Open Hi-Hat',
+    'Low-Mid Tom',
+    'High-Mid Tom',
+    'Crash Cymbal 1',
+    'High Tom',
+    'Ride Cymbal 1',
+    'Chinese Cymbal',
+    'Ride Bell',
+    'Tambourine',
+    'Splash Cymbal',
+    'Cowbell',
+    'Crash Cymbal 2',
+    'Vibraslap',
+    'Ride Cymbal 2',
+    'High Bongo',
+    'Low Bongo',
+    'Mute High Conga',
+    'Open High Conga',
+    'Low Conga',
+    'High Timbale',
+    'Low Timbale',
+    'High Agogo',
+    'Low Agogo',
+    'Cabasa',
+    'Maracas',
+    'Short Whistle',
+    'Long Whistle',
+    'Short Guiro',
+    'Long Guiro',
+    'Claves',
+    'High Woodblock',
+    'Low Woodblock',
+    'Mute Cuica',
+    'Open Cuica',
+    'Mute Triangle',
+    'Open Triangle',
+    'Shaker',
+    'Jingle Bell',
+    'Belltree',
+    'Castanets',
+    'Mute Surdo',
+    'Open Surdo',
+    *(['(MIDI drum out of range)'] * 40),
+]
+
+midiccs = {
+    0: 'Bank Select MSB',
+    1: 'Mod Wheel MSB',
+    2: 'Breath Control MSB',
+    4: 'Foot Pedal MSB',
+    5: 'Portamento Time MSB',
+    6: 'Data Entry MSB',
+    7: 'Volume MSB',
+    8: 'Balance MSB',
+    10: 'Pan MSB',
+    11: 'Expression MSB',
+    12: 'Effect 1 MSB',
+    13: 'Effect 2 MSB',
+
+    32: 'Bank Select LSB',
+    33: 'Mod Wheel LSB',
+    34: 'Breath Control LSB',
+    36: 'Foot Pedal LSB',
+    37: 'Portamento Time LSB',
+    38: 'Data Entry LSB',
+    39: 'Volume LSB',
+    40: 'Balance LSB',
+    42: 'Pan LSB',
+    43: 'Expression LSB',
+    44: 'Effect 1 LSB',
+    45: 'Effect 2 LSB',
+
+    64: 'Damper Pedal',
+    65: 'Portamento on/off',
+    66: 'Sostenuto Pedal',
+    67: 'Soft Pedal',
+    68: 'Legato',
+    69: 'Hold 2',
+    70: 'Variation',
+    71: 'Resonance',
+    72: 'Release Time',
+    73: 'Attack Time',
+    74: 'Cutoff',
+    84: 'Portamento Time',
+
+    91: 'Reverb Depth',
+    92: 'Tremolo Depth',
+    93: 'Chorus Depth',
+    94: 'Detune Depth',
+    95: 'Phaser Depth',
+
+    96: 'Data Increment',
+    97: 'Data Decrement',
+
+    98: 'NRPN LSB',
+    99: 'NRPN MSB',
+    100: 'RPN LSB',
+    101: 'RPN MSB',
+
+    120: 'All Sound Off',
+    121: 'Reset All Controllers',
+    122: 'Local on/off',
+    123: 'All Notes Off',
+    124: 'Omni Off',
+    125: 'Omni On',
+
+    126: 'Mono On',
+    127: 'Poly On',
+
+}
+
+midipatches = [
+    'Acoustic Grand Piano',
+    'Bright Acoustic Piano',
+    'Electric Grand Piano',
+    'Honky-tonk Piano',
+    'Electric Piano 1',
+    'Electric Piano 2',
+    'Harpsichord',
+    'Clavinet',
+    'Celesta',
+    'Glockenspiel',
+    'Music Box',
+    'Vibraphone',
+    'Marimba',
+    'Xylophone',
+    'Tubular Bells',
+    'Dulcimer',
+    'Drawbar Organ',
+    'Percussive Organ',
+    'Rock Organ',
+    'Church Organ',
+    'Reed Organ',
+    'Accordion',
+    'Harmonica',
+    'Bandoneon',
+    'Acoustic Guitar (Nylon)',
+    'Acoustic Guitar (Steel)',
+    'Electric Guitar (Jazz)',
+    'Electric Guitar (Clean)',
+    'Electric Guitar (Muted)',
+    'Electric Guitar (Overdriven)',
+    'Electric Guitar (Distortion)',
+    'Electric Guitar (Harmonics)',
+    'Acoustic Bass',
+    'Electric Bass (finger)',
+    'Electric Bass (picked)',
+    'Fretless Bass',
+    'Slap Bass 1',
+    'Slap Bass 2',
+    'Synth Bass 1',
+    'Synth Bass 2',
+    'Violin',
+    'Viola',
+    'Cello',
+    'Contrabass',
+    'Tremolo Strings',
+    'Pizzicato Strings',
+    'Orchestral Harp',
+    'Timpani',
+    'String Ensemble 1',
+    'String Ensemble 2',
+    'Synth Strings 1',
+    'Synth Strings 2',
+    'Choir Aahs',
+    'Voice Doos',
+    'Synth Voice',
+    'Orchestra Hit',
+    'Trumpet',
+    'Trombone',
+    'Tuba',
+    'Muted Trumpet',
+    'French Horn',
+    'Brass Section',
+    'Synth Brass 1',
+    'Synth Brass 2',
+    'Soprano Sax',
+    'Alto Sax',
+    'Tenor Sax',
+    'Baritone Sax',
+    'Oboe',
+    'English Horn',
+    'Bassoon',
+    'Clarinet',
+    'Piccolo',
+    'Flute',
+    'Recorder',
+    'Pan Flute',
+    'Blown Bottle',
+    'Shakuhachi',
+    'Whistle',
+    'Ocarina',
+    'Lead 1 (Square)',
+    'Lead 2 (Sawtooth)',
+    'Lead 3 (Triangle)',
+    'Lead 4 (Chiff+Sine)',
+    'Lead 5 (Charang)',
+    'Lead 6 (Voice)',
+    'Lead 7 (Fifths)',
+    'Lead 8 (Solo)',
+    'Pad 1 (Fantasia)',
+    'Pad 2 (Warm)',
+    'Pad 3 (Polysynth)',
+    'Pad 4 (Choir)',
+    'Pad 5 (Bowed)',
+    'Pad 6 (Metallic)',
+    'Pad 7 (Halo)',
+    'Pad 8 (Sweep)',
+    'FX 1 (Raindrop)',
+    'FX 2 (Soundtrack)',
+    'FX 3 (Crystal)',
+    'FX 4 (Atmosphere)',
+    'FX 5 (Brightness)',
+    'FX 6 (Goblin)',
+    'FX 7 (Echo)',
+    'FX 8 (Sci-Fi)',
+    'Sitar',
+    'Banjo',
+    'Shamisen',
+    'Koto',
+    'Kalimba',
+    'Bagpipe',
+    'Fiddle',
+    'Shanai',
+    'Tinkle Bell',
+    'Agogo',
+    'Steel Drum',
+    'Woodblock',
+    'Taiko Drum',
+    'Melodic Tom',
+    'Synth Drum',
+    'Reverse Cymbal',
+    'Fret Noise',
+    'Breath Noise',
+    'Seashore',
+    'Bird Tweet',
+    'Telephone Ring',
+    'Helicopter',
+    'Applause',
+    'Gunshot',
+]
+
+def MIDItoYAML(ifh,z):
+    om = mido.MidiFile(file=ifh)
+    z['version'] = 1
+    z['loop_addr'] = 0
+    z['pcm_offset'] = 0
+    z['fm_channel_mask'] = 0
+    z['psg_channel_mask'] = 0
+    z['reserved_header'] = 0
+
+    nm = mido.MidiFile()
+    nm.tracks.append(mido.merge_tracks(om.tracks))
+    nm.type = 0
+    nm.ticks_per_beat = om.ticks_per_beat
+
+    # get list of tempos
+
+    candidate_ticks = []
+    for msg in nm.tracks[0]:
+        if msg.type == 'set_tempo':
+            candidate_ticks.append(round(1000000/(msg.tempo / 24), 3))
+
+    # for now let's just use the first one
+    ctick = candidate_ticks[0]
+
+    while ctick < 60:
+        ctick *= 2
+
+    while ctick > 255:
+        ctick /= 2
+
+    z['tick_rate'] = int(ctick)
+
+    tempo = 500000
+    newtempo = tempo
+    ms_per_tick = 1000000/z['tick_rate']
+    speed = (nm.ticks_per_beat*ms_per_tick)/tempo
+    delay = 0
+    oldcmd = 0
+    note_data = []
+    flush = False
+
+    z['data'] = []
+    d = z['data']
+
+    #print(speed)
+
+    # now process the data
+    for msg in nm.tracks[0]:
+        delay += msg.time
+        ticks_now = 0
+        if delay > 0:
+            ticks_now = math.floor(delay / speed)
+        if flush or ticks_now > 0:
+            while len(note_data) > 0:
+                writes = len(note_data)
+                if writes > 62:
+                    writes = 62
+                d.append({'chip_write': {'chip_id':1, 'data':note_data[0:writes]}})
+                note_data = note_data[writes:]
+            flush = False
+            oldcmd = 0
+        while ticks_now > 0:
+            this_delay = ticks_now
+            if this_delay > 63:
+                this_delay = 63
+            d.append({'delay': this_delay & 0x7F})
+            delay -= this_delay * speed
+            ticks_now -= this_delay
+        if newtempo != tempo:
+            tempo = newtempo
+            speed = (nm.ticks_per_beat*ms_per_tick)/tempo
+        if msg.type == 'note_off':
+            cmd = 0x80 | msg.channel
+            if oldcmd != cmd:
+                note_data.append(cmd)
+            oldcmd = cmd
+            note_data.append(msg.note)
+            note_data.append(msg.velocity)
+        elif msg.type == 'note_on':
+            cmd = 0x90 | msg.channel
+            if oldcmd != cmd:
+                note_data.append(cmd)
+            oldcmd = cmd
+            note_data.append(msg.note)
+            note_data.append(msg.velocity)
+        elif msg.type == 'polytouch':
+            cmd = 0xa0 | msg.channel
+            if oldcmd != cmd:
+                note_data.append(cmd)
+            oldcmd = cmd
+            note_data.append(msg.note)
+            note_data.append(msg.value)
+        elif msg.type == 'control_change':
+            cmd = 0xb0 | msg.channel
+            if oldcmd != cmd:
+                note_data.append(cmd)
+            oldcmd = cmd
+            note_data.append(msg.control)
+            note_data.append(msg.value)
+        elif msg.type == 'program_change':
+            cmd = 0xc0 | msg.channel
+            if oldcmd != cmd:
+                note_data.append(cmd)
+            oldcmd = cmd
+            note_data.append(msg.program)
+        elif msg.type == 'aftertouch':
+            cmd = 0xd0 | msg.channel
+            if oldcmd != cmd:
+                note_data.append(cmd)
+            oldcmd = cmd
+            note_data.append(msg.value)
+        elif msg.type == 'pitchwheel':
+            cmd = 0xe0 | msg.channel
+            pitch = msg.pitch + 0x2000
+            pitch_l = pitch & 0x7f
+            pitch_h = (pitch >> 7) & 0x7f
+            if oldcmd != cmd:
+                note_data.append(cmd)
+            oldcmd = cmd
+            note_data.append(pitch_l)
+            note_data.append(pitch_h)
+        elif msg.type == 'set_tempo':
+            newtempo = msg.tempo
+            flush = True
+        elif isinstance(msg, mido.MetaMessage):
+            pass # ignore all other metamessages
+        else:
+            raise
+
+    while len(note_data) > 0:
+        writes = len(note_data)
+        if writes > 61:
+            writes = 61
+        d.append({'chip_write': {'chip_id':1, 'data':note_data[0:writes]}})
+        note_data = note_data[writes:]
+
+    d.append("eod")
+    return True
+
 
 def ZSMtoYAML(ifh,z):
     state = 0
@@ -22,8 +428,8 @@ def ZSMtoYAML(ifh,z):
                 return False
                                                 # Byte 02, version number
             z['version'] = unpack("B",ifh.read(1))[0]
-            
-            if z['version'] != 1:    
+
+            if z['version'] != 1:
                 return False
                                                 # Bytes 03-05, loop point
             z['loop_addr'] = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
@@ -63,6 +469,14 @@ def ZSMtoYAML(ifh,z):
                     for i in range((chn & 0x3f) >> 1):
                         pcm_write.append({'addr': HexInt(unpack("B",ifh.read(1))[0],width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
                     d.append({'pcm_write': pcm_write})
+                elif channel == 1: # Chip data
+                    total_bytes = chn & 0x3f
+                    chip_type = unpack("B",ifh.read(1))[0]
+                    total_bytes -= 1
+                    chip_write = []
+                    for i in range(total_bytes):
+                        chip_write.append(HexInt(unpack("B",ifh.read(1))[0],width=2))
+                    d.append({'chip_write': {'chip_id': chip_type, 'data': chip_write}})
                 elif channel == 2: # Sync data
                     sync_event = []
                     for i in range((chn & 0x3f) >> 1):
@@ -88,7 +502,7 @@ def ZSMtoYAML(ifh,z):
                     if ifh.tell() == z['pcm_offset']:
                         state = state+1
                     else: # PCM data doesn't line up, error
-                        return False                        
+                        return False
                 else:
                     del z['pcm_offset']
                     return True
@@ -115,7 +529,7 @@ def ZSMtoYAML(ifh,z):
             d.append({'pcm_data': [{'value': HexInt(num, width=2)} for num in list(ifh.read())]})
         else:
             return False
-    
+
     if state == 2:
         # If we hit EOF, assume it was a full read
         return True
@@ -182,6 +596,19 @@ def YAMLtoZSM(ofh,z):
                         # Write out the PCM events themselves
                         ofh.write(pack("B",v2[i2]['addr']))
                         ofh.write(pack("B",v2[i2]['data']))
+                        i2 += 1
+                elif k2 == 'chip_write':
+                    if len(v2['data']) > 62:
+                        warnings.warn("Excessive run length of chip write block")
+                        return False
+                    # Write out the EXT command and channel+length
+                    ofh.write(b'\x40')
+                    ofh.write(pack("B",(len(v2['data'])+1)|0x40))
+                    ofh.write(pack("B",v2['chip_id']))
+                    i2 = 0
+                    while i2 < len(v2['data']):
+                        # Write out the chip write events themselves
+                        ofh.write(pack("B",v2['data'][i2]))
                         i2 += 1
                 elif k2 == 'sync_event':
                     if len(v2) > 0x1f:
@@ -522,6 +949,103 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                     v2[i2].yaml_add_eol_comment("Generic sync message",key='type')
                                     v2[i2].yaml_add_eol_comment("Raw value",key='data')
                                 i2 += 1
+                        elif k2 == 'chip_write':
+                            file_offset += 3
+                            # Replace any existing comment
+                            d[di].ca.items.pop(k2,None)
+                            d[di].yaml_add_eol_comment("Chip write block: {0:d} (0x{1:02x}) data bytes".format(len(v2['data']),len(v2['data'])),key=k2)
+                            if v2['chip_id'] == 1 or v2['chip_id'] == 2: # MIDI
+                                v2.yaml_add_eol_comment(f"MIDI {v2['chip_id']:d}",key='chip_id')
+                                i2 = 0
+                                cmd = 0
+
+                                v2.ca.items.pop('data',None)
+                                v2.yaml_add_eol_comment(f"MIDI events",key='data')
+                                while i2 < len(v2['data']):
+                                    file_offset += 1
+                                    # Remove any existing comments
+                                    v2['data'].ca.items.pop(i2,None)
+                                    # Normalize data to hex unless overridden later
+                                    v2['data'][i2] = HexInt(v2['data'][i2],width=2)
+                                    if v2['data'][i2] & 0xf0 >= 0x80:
+                                        if v2['data'][i2] < 0xf0:
+                                            cmd = v2['data'][i2]
+                                            ctype = cmd & 0xf0
+                                            parm = 0
+                                            chn = cmd & 0x0f
+                                        if ctype == 0x80:
+                                            v2['data'].yaml_add_eol_comment(f"Note off, MIDI channel {chn+1}", i2)
+                                        elif ctype == 0x90:
+                                            v2['data'].yaml_add_eol_comment(f"Note on, MIDI channel {chn+1}", i2)
+                                        elif ctype == 0xa0:
+                                            v2['data'].yaml_add_eol_comment(f"Note aftertouch, MIDI channel {chn+1}", i2)
+                                        elif ctype == 0xb0:
+                                            v2['data'].yaml_add_eol_comment(f"Continuous dontroller, MIDI channel {chn+1}", i2)
+                                        elif ctype == 0xc0:
+                                            v2['data'].yaml_add_eol_comment(f"Program change, MIDI channel {chn+1}", i2)
+                                        elif ctype == 0xd0:
+                                            v2['data'].yaml_add_eol_comment(f"Channel aftertouch, MIDI channel {chn+1}", i2)
+                                        elif ctype == 0xe0:
+                                            v2['data'].yaml_add_eol_comment(f"Pitch bend, MIDI channel {chn+1}", i2)
+                                    else:
+                                        if ctype == 0x80:
+                                            if parm == 0:
+                                                note = ('C-','C#','D-','D#','E-','F-','F#','G-','G#','A-','A#','B-')[v2['data'][i2] % 12]
+                                                octave = int(int(v2['data'][i2]/12)-1)
+                                                if chn == 9:
+                                                    key = mididrum[v2['data'][i2]]
+                                                else:
+                                                    key = f"Key {note}{octave}"
+                                                v2['data'].yaml_add_eol_comment(f"{key} (Note off, Ch {chn+1})", i2)
+                                                parm += 1
+                                            else:
+                                                v2['data'].yaml_add_eol_comment(f"Velocity {v2['data'][i2]} (Note off, Ch {chn+1})", i2)
+                                                parm = 0
+                                        if ctype == 0x90:
+                                            if parm == 0:
+                                                note = ('C-','C#','D-','D#','E-','F-','F#','G-','G#','A-','A#','B-')[v2['data'][i2] % 12]
+                                                octave = int(int(v2['data'][i2]/12)-1)
+                                                if chn == 9:
+                                                    key = mididrum[v2['data'][i2]]
+                                                else:
+                                                    key = f"Key {note}{octave}"
+                                                v2['data'].yaml_add_eol_comment(f"{key} (Note on, Ch {chn+1})", i2)
+                                                parm += 1
+                                            else:
+                                                v2['data'].yaml_add_eol_comment(f"Velocity {v2['data'][i2]} (Note on, Ch {chn+1})", i2)
+                                                parm = 0
+                                        if ctype == 0xa0:
+                                            if parm == 0:
+                                                note = ('C-','C#','D-','D#','E-','F-','F#','G-','G#','A-','A#','B-')[v2['data'][i2] % 12]
+                                                octave = int(int(v2['data'][i2]/12)-1)
+                                                if chn == 9:
+                                                    key = mididrum[v2['data'][i2]]
+                                                else:
+                                                    key = f"Key {note}{octave}"
+                                                v2['data'].yaml_add_eol_comment(f"{key} (Note aftertouch, Ch {chn+1})", i2)
+                                                parm += 1
+                                            else:
+                                                v2['data'].yaml_add_eol_comment(f"Value {v2['data'][i2]} (Note aftertouch, Ch {chn+1})", i2)
+                                                parm = 0
+                                        if ctype == 0xb0:
+                                            if parm == 0:
+                                                try:
+                                                    cname = midiccs[v2['data'][i2]]
+                                                except KeyError:
+                                                    cname = f"CC {v2['data'][i2]}"
+                                                v2['data'].yaml_add_eol_comment(f"{cname} (CC, Ch {chn+1})", i2)
+                                                parm += 1
+                                            else:
+                                                v2['data'].yaml_add_eol_comment(f"Value {v2['data'][i2]} (CC, Ch {chn+1})", i2)
+                                                parm = 0
+                                        if ctype == 0xc0:
+                                            try:
+                                                iname = midipatches[v2['data'][i2]]
+                                            except KeyError:
+                                                iname = f"Unknown patch"
+                                            v2['data'].yaml_add_eol_comment(f"{iname} (Program {v2['data'][i2]}, Ch {chn+1})", i2)
+                                            parm = 0
+                                    i2 += 1
                         elif k2 == 'delay':
                             file_offset += 1
                             ticks += v2
@@ -573,13 +1097,24 @@ y = yaml.load("""zsm:\n  version: 0\n""")
 parser = argparse.ArgumentParser()
 inputgroup = parser.add_mutually_exclusive_group()
 outputgroup = parser.add_mutually_exclusive_group()
+inputgroup.add_argument("-m", metavar="input.mid", type=argparse.FileType('rb'), help='Input MIDI file')
 inputgroup.add_argument("-i", metavar="input.zsm", type=argparse.FileType('rb'), help='Input ZSM file')
-inputgroup.add_argument("-c", metavar="input.yml", type=argparse.FileType('r'), help='Compile structured text to ZSM')
+inputgroup.add_argument("-c", metavar="input.yaml", type=argparse.FileType('r'), help='Input YAML file')
 outputgroup.add_argument("-o", metavar="output.zsm", type=argparse.FileType('wb'), help='Output ZSM file')
-outputgroup.add_argument("-d", metavar="output.yml", type=argparse.FileType('w'), help='Decompile a ZSM to structured text')
+outputgroup.add_argument("-d", metavar="output.yaml", type=argparse.FileType('w'), help='Output YAML file')
 
 
 args = parser.parse_args()
+
+if (args.m is not None): # Import a MIDI file
+    if not MIDItoYAML(args.m,y['zsm']):
+        warnings.warn("MIDI import problem: trying to continue anyway")
+    # Round-trip it in YAML so the entire structure is upgraded and comments can be attached
+    buf = bytes()
+    buff = io.BytesIO(buf)
+    yaml.dump(y,buff)
+    buff.seek(0)
+    y = yaml.load(buff)
 
 
 if (args.i is not None): # Import a ZSM
@@ -594,7 +1129,7 @@ if (args.i is not None): # Import a ZSM
 
 if (args.c is not None): # Import a YAML
     y = yaml.load(args.c)
-    
+
 annotateYAML(y['zsm']) # Comment everything, convert the representation of numbers, etc. to improve readability
 
 if (args.o is not None): # Export a ZSM
