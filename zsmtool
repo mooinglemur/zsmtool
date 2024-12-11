@@ -432,9 +432,9 @@ def ZSMtoYAML(ifh,z):
             if z['version'] != 1:
                 return False
                                                 # Bytes 03-05, loop point
-            z['loop_addr'] = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
+            z['loop_addr'] = unpack("<L",ifh.read(3) + b'\x00')[0]
                                                 # Bytes 06-08, PCM offset
-            z['pcm_offset'] = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
+            z['pcm_offset'] = unpack("<L",ifh.read(3) + b'\x00')[0]
                                                 # Byte 09, FM chanel mask
             z['fm_channel_mask'] = unpack("B",ifh.read(1))[0]
                                                 # Bytes 0A-0B, PSG chan mask
@@ -442,7 +442,7 @@ def ZSMtoYAML(ifh,z):
                                                 # Bytes 0C-0D, tick rate
             z['tick_rate'] = unpack("<H",ifh.read(2))[0]
                                                 # Bytes 0E-0F, reserved 0x00
-            z['reserved_header'] = HexInt(unpack("<H",ifh.read(2))[0],width=4)
+            z['reserved_header'] = unpack("<H",ifh.read(2))[0]
 
             z['data'] = []
 
@@ -460,14 +460,14 @@ def ZSMtoYAML(ifh,z):
             if b < 0x40: # PSG write
                 if psg_write_group is None:
                     psg_write_group = []
-                psg_write_group.append({'addr': HexInt(b,width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
+                psg_write_group.append({'addr': b, 'data': unpack("B",ifh.read(1))[0]})
             elif b == 0x40: # EXT
                 chn = unpack("B",ifh.read(1))[0]
                 channel = (chn >> 6) & 0x03
                 if channel == 0: # PCM data
                     pcm_write = []
                     for i in range((chn & 0x3f) >> 1):
-                        pcm_write.append({'addr': HexInt(unpack("B",ifh.read(1))[0],width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
+                        pcm_write.append({'addr': unpack("B",ifh.read(1))[0], 'data': unpack("B",ifh.read(1))[0]})
                     d.append({'pcm_write': pcm_write})
                 elif channel == 1: # Chip data
                     total_bytes = chn & 0x3f
@@ -475,15 +475,15 @@ def ZSMtoYAML(ifh,z):
                     total_bytes -= 1
                     chip_write = []
                     for i in range(total_bytes):
-                        chip_write.append(HexInt(unpack("B",ifh.read(1))[0],width=2))
+                        chip_write.append(unpack("B",ifh.read(1))[0])
                     d.append({'chip_write': {'chip_id': chip_type, 'data': chip_write}})
                 elif channel == 2: # Sync data
                     sync_event = []
                     for i in range((chn & 0x3f) >> 1):
-                        sync_event.append({'type': HexInt(unpack("B",ifh.read(1))[0],width=2), 'data': HexInt(unpack("B",ifh.read(1))[0],width=2)})
+                        sync_event.append({'type': unpack("B",ifh.read(1))[0], 'data': unpack("B",ifh.read(1))[0]})
                     d.append({'sync_event': sync_event})
                 else: # other EXT command
-                    ext = {'channel': HexInt(channel,width=2), 'data': []}
+                    ext = {'channel': channel, 'data': []}
                     for i in range(chn & 0x3f):
                         ext['data'].append(unpack("B",ifh.read(1))[0])
                     d.append({'ext_data': ext})
@@ -507,7 +507,7 @@ def ZSMtoYAML(ifh,z):
                     del z['pcm_offset']
                     return True
             else: # Delay
-                d.append({'delay': HexInt(b & 0x7F,width=2)})
+                d.append({'delay': b & 0x7F})
         elif state == 2: # PCM data
             if byte != b'P':
                 return False
@@ -518,15 +518,15 @@ def ZSMtoYAML(ifh,z):
             for i in range(last_inst+1):
                 if i != unpack("B",ifh.read(1))[0]:
                     return False
-                igeom = HexInt(unpack("B",ifh.read(1))[0],width=2)
-                ioffset = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
-                ilength = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
-                ifeat = HexInt(unpack("B",ifh.read(1))[0],width=2)
-                iloop = HexInt(unpack("<L",ifh.read(3) + b'\x00')[0],width=6)
-                ires = HexInt(unpack("<L",ifh.read(4))[0],width=8)
+                igeom = unpack("B",ifh.read(1))[0]
+                ioffset = unpack("<L",ifh.read(3) + b'\x00')[0]
+                ilength = unpack("<L",ifh.read(3) + b'\x00')[0]
+                ifeat = unpack("B",ifh.read(1))[0]
+                iloop = unpack("<L",ifh.read(3) + b'\x00')[0]
+                ires = unpack("<L",ifh.read(4))[0]
                 insts.append({'geometry': igeom, 'offset': ioffset, 'length': ilength, 'features': ifeat, 'loop_point': iloop, 'reserved': ires})
             d.append({'pcm_insts': insts})
-            d.append({'pcm_data': [{'value': HexInt(num, width=2)} for num in list(ifh.read())]})
+            d.append({'pcm_data': [{'value': num} for num in list(ifh.read())]})
         else:
             return False
 
@@ -951,6 +951,8 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                 i2 += 1
                         elif k2 == 'chip_write':
                             file_offset += 3
+                            # Normalize chip_id
+                            v2['chip_id'] = HexInt(v2['chip_id'],width=2)
                             # Replace any existing comment
                             d[di].ca.items.pop(k2,None)
                             d[di].yaml_add_eol_comment("Chip write block: {0:d} (0x{1:02x}) data bytes".format(len(v2['data']),len(v2['data'])),key=k2)
@@ -965,7 +967,7 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                     file_offset += 1
                                     # Remove any existing comments
                                     v2['data'].ca.items.pop(i2,None)
-                                    # Normalize data to hex unless overridden later
+                                    # Normalize data to hex
                                     v2['data'][i2] = HexInt(v2['data'][i2],width=2)
                                     if v2['data'][i2] & 0xf0 >= 0x80:
                                         if v2['data'][i2] < 0xf0:
@@ -1047,6 +1049,7 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                             parm = 0
                                     i2 += 1
                         elif k2 == 'delay':
+                            v2 = ScalarInt(v2)
                             file_offset += 1
                             ticks += v2
                             tsec = ticks/z['tick_rate']
@@ -1059,6 +1062,18 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                             d[di].yaml_add_eol_comment("Instrument definitions",key=k2)
                             i2 = 0
                             while i2 < len(v2):
+                                v2[i2].ca.items.pop('geometry', None) # remove any old comment
+                                v2[i2].ca.items.pop('offset', None) # remove any old comment
+                                v2[i2].ca.items.pop('length', None) # remove any old comment
+                                v2[i2].ca.items.pop('features', None) # remove any old comment
+                                v2[i2].ca.items.pop('loop_point', None) # remove any old comment
+                                v2[i2].ca.items.pop('reserved', None) # remove any old comment
+                                v2[i2]['geometry'] = HexInt(v2[i2]['geometry'], width=2)
+                                v2[i2]['offset'] = HexInt(v2[i2]['offset'], width=6)
+                                v2[i2]['length'] = HexInt(v2[i2]['length'], width=6)
+                                v2[i2]['features'] = HexInt(v2[i2]['features'], width=2)
+                                v2[i2]['loop_point'] = HexInt(v2[i2]['loop_point'], width=6)
+                                v2[i2]['reserved'] = HexInt(v2[i2]['reserved'], width=8)
                                 pcm_ch = 2 if v2[i2]['geometry'] & 0x10 else 1
                                 pcm_depth = 16 if v2[i2]['geometry'] & 0x20 else 8
                                 cmt = ("Instrument 0x{0:02x}, ".format(i2))+("{0:d}-bit".format(pcm_depth))+(" stereo" if pcm_ch == 2 else " mono")
@@ -1069,6 +1084,10 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                             d[di].ca.items.pop(k2,None)
                             i2 = 0
                             while i2 < len(v2):
+                                for pdi in range(16):
+                                    if i2+pdi < len(v2):
+                                        v2[i2+pdi].ca.items.pop('value',None)
+                                        v2[i2+pdi]['value'] = HexInt(v2[i2+pdi]['value'], width=2)
                                 v2[i2].yaml_add_eol_comment("Offset 0x{0:06x}".format(i2),key='value')
                                 i2 += 16
                         else:
@@ -1083,7 +1102,7 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                         z['loop_addr'] = HexInt(file_offset,width=6)
                     elif d[di] == 'eod':
                         file_offset += 1
-                        d.yaml_add_eol_comment("End of ZSM data",key=di)
+                        d.yaml_add_eol_comment("End of ZSM stream",key=di)
                 else:
                     print(type(d[di]))
                 di += 1
@@ -1103,6 +1122,10 @@ inputgroup.add_argument("-c", metavar="input.yaml", type=argparse.FileType('r'),
 outputgroup.add_argument("-o", metavar="output.zsm", type=argparse.FileType('wb'), help='Output ZSM file')
 outputgroup.add_argument("-d", metavar="output.yaml", type=argparse.FileType('w'), help='Output YAML file')
 
+
+if len(sys.argv) == 1:
+    parser.print_help()
+    sys.exit(1)
 
 args = parser.parse_args()
 
