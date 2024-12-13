@@ -397,12 +397,18 @@ def MIDItoYAML(ifh,z):
             oldcmd = cmd
             note_data.append(pitch_l)
             note_data.append(pitch_h)
+        elif msg.type == 'sysex':
+            note_data.append(0xf0)
+            for item in msg.data:
+                note_data.append(item)
+            note_data.append(0xf7)
         elif msg.type == 'set_tempo':
             newtempo = msg.tempo
             flush = True
         elif isinstance(msg, mido.MetaMessage):
             pass # ignore all other metamessages
         else:
+            print(msg)
             raise
 
     while len(note_data) > 0:
@@ -970,11 +976,10 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                     # Normalize data to hex
                                     v2['data'][i2] = HexInt(v2['data'][i2],width=2)
                                     if v2['data'][i2] & 0xf0 >= 0x80:
-                                        if v2['data'][i2] < 0xf0:
-                                            cmd = v2['data'][i2]
-                                            ctype = cmd & 0xf0
-                                            parm = 0
-                                            chn = cmd & 0x0f
+                                        cmd = v2['data'][i2]
+                                        ctype = cmd & 0xf0
+                                        parm = 0
+                                        chn = cmd & 0x0f
                                         if ctype == 0x80:
                                             v2['data'].yaml_add_eol_comment(f"Note off, MIDI channel {chn+1}", i2)
                                         elif ctype == 0x90:
@@ -989,6 +994,10 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                             v2['data'].yaml_add_eol_comment(f"Channel aftertouch, MIDI channel {chn+1}", i2)
                                         elif ctype == 0xe0:
                                             v2['data'].yaml_add_eol_comment(f"Pitch bend, MIDI channel {chn+1}", i2)
+                                        elif cmd == 0xf0:
+                                            v2['data'].yaml_add_eol_comment(f"Sysex begin", i2)
+                                        elif cmd == 0xf7:
+                                            v2['data'].yaml_add_eol_comment(f"Sysex end", i2)
                                     else:
                                         if ctype == 0x80:
                                             if parm == 0:
@@ -1047,6 +1056,18 @@ def annotateYAML(z): # perhaps this should be called annotate_map, since it's no
                                                 iname = f"Unknown patch"
                                             v2['data'].yaml_add_eol_comment(f"{iname} (Program {v2['data'][i2]}, Ch {chn+1})", i2)
                                             parm = 0
+                                        if ctype == 0xd0:
+                                            v2['data'].yaml_add_eol_comment(f"Value {v2['data'][i2]} (Channel aftertouch, Ch {chn+1})", i2)
+                                            parm = 0
+                                        if ctype == 0xe0:
+                                            if parm == 0:
+                                                v2['data'].yaml_add_eol_comment(f"LSB (PB, Ch {chn+1})", i2)
+                                                pbl = v2['data'][i2]
+                                                parm += 1
+                                            else:
+                                                pbfull = (v2['data'][i2] << 7) | pbl
+                                                v2['data'].yaml_add_eol_comment(f"MSB: Value {pbfull}/0x{pbfull:04x} (PB, Ch {chn+1})", i2)
+                                                parm = 0
                                     i2 += 1
                         elif k2 == 'delay':
                             v2 = ScalarInt(v2)
